@@ -305,8 +305,6 @@ def main():
             try:
                 await f1.download_to_drive(save_path)
                 if save_path.exists():
-                    prefix = '!' if reply.photo and idx == 0 else ''
-                    lines.append(f"{prefix}[{ent.__class__.__name__}](./{save_path.name})")
                     saved_files.append(save_path)
             except Exception:
                 continue
