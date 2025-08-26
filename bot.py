@@ -12,6 +12,7 @@ from typing import List, Tuple
 from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from telegram.constants import ParseMode
+from telegram.helpers import escape_markdown
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -49,8 +50,12 @@ def parse_markdown_media(md_text: str, base_dir: Path) -> Tuple[str, List[Path]]
     media_paths: List[Path] = []
     def repl(m: re.Match) -> str:
         rel = m.group(1).strip()
-        media_paths.append((base_dir / rel).resolve())
-        return ''
+        p = (base_dir / rel).resolve()
+        if p.exists():
+            media_paths.append(p)
+            return ''
+        # leave non-existent (e.g. remote) links intact
+        return m.group(0)
     text = MEDIA_RE.sub(repl, md_text)
     return text, media_paths
 
@@ -121,9 +126,13 @@ def main():
             if not existing_media:
                 # send raw markdown text with formatting
                 if plain_text:
+                    text_escaped = escape_markdown(plain_text, version=2)
+                    # preserve Markdown V2 highlighting and links ([], ())
+                    for ch in '*_[]()':
+                        text_escaped = text_escaped.replace(f'\{ch}', ch)
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        text=plain_text,
+                        text=text_escaped,
                         parse_mode=ParseMode.MARKDOWN_V2,
                         reply_to_message_id=reply_target,
                     )
@@ -131,6 +140,10 @@ def main():
             # prepare media group; if text is too long for a caption, send it separately
             caption = plain_text or ''
             long_caption = bool(caption and len(caption) > 1024)
+            caption_escaped = escape_markdown(caption, version=2) if caption else ''
+            # preserve Markdown V2 highlighting and links ([], ())
+            for ch in '*_[]()':
+                caption_escaped = caption_escaped.replace(f'\{ch}', ch)
             media_group = []
             for idx, p in enumerate(existing_media):
                 with open(p, 'rb') as f:
@@ -139,17 +152,29 @@ def main():
                 ext = p.suffix.lower()
                 first_caption = idx == 0 and caption and not long_caption
                 if ext in ('.jpg', '.jpeg', '.png', '.gif'):
-                    media = InputMediaPhoto(media=bio, caption=caption if first_caption else None, parse_mode=ParseMode.MARKDOWN_V2)
+                    media = InputMediaPhoto(
+                        media=bio,
+                        caption=caption_escaped if first_caption else None,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
                 elif ext in ('.mp4', '.mov', '.mkv', '.webm'):
-                    media = InputMediaVideo(media=bio, caption=caption if first_caption else None, parse_mode=ParseMode.MARKDOWN_V2)
+                    media = InputMediaVideo(
+                        media=bio,
+                        caption=caption_escaped if first_caption else None,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
                 else:
-                    media = InputMediaDocument(media=bio, caption=caption if first_caption else None, parse_mode=ParseMode.MARKDOWN_V2)
+                    media = InputMediaDocument(
+                        media=bio,
+                        caption=caption_escaped if first_caption else None,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
                 media_group.append(media)
             # send text separately if caption was too long
             if long_caption:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=caption,
+                    text=caption_escaped,
                     reply_to_message_id=reply_target,
                 )
             if media_group:
