@@ -12,10 +12,11 @@ from typing import List, Tuple
 from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from telegram.constants import ParseMode
+from telegram.helpers import escape_markdown
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
+    level=logging.DEBUG,
 )
 ADMIN_IDS: set[int] = set()
 
@@ -44,13 +45,23 @@ def load_snip_md(hashtag: str) -> str | None:
     with open(p, 'r', encoding='utf-8') as f:
         return f.read()
 
+def load_snip_html(hashtag: str) -> str | None:
+    p = SNIPS / f"{hashtag}.html"
+    if not p.exists():
+        return None
+    with open(p, 'r', encoding='utf-8') as f:
+        return f.read()
+
 
 def parse_markdown_media(md_text: str, base_dir: Path) -> Tuple[str, List[Path]]:
     media_paths: List[Path] = []
     def repl(m: re.Match) -> str:
         rel = m.group(1).strip()
-        media_paths.append((base_dir / rel).resolve())
-        return ''
+        p = (base_dir / rel).resolve()
+        if p.exists():
+            media_paths.append(p)
+            return ''
+        return m.group(0)
     text = MEDIA_RE.sub(repl, md_text)
     return text, media_paths
 
@@ -86,6 +97,7 @@ def main():
 
     async def handle_message(update, context):
         m = update.effective_message
+        logging.debug("handle_message called: user=%s chat=%s text=%r", update.effective_user.id if update.effective_user else None, update.effective_chat.id if update.effective_chat else None, m.text)
         if not m or not m.text:
             return
         # always reply one level up: if this message was a reply, follow that chain, else reply to tag message
@@ -100,6 +112,7 @@ def main():
         except Exception:
             meta = {}
         hashtags = extract_hashtags(m.text)
+        logging.debug("extract_hashtags -> %s", hashtags)
         if not hashtags:
             return
         for tag in hashtags:
@@ -115,15 +128,64 @@ def main():
                 continue
             md = load_snip_md(tag)
             if md is None:
+                html = load_snip_html(tag)
+                if html is None:
+                    continue
+                # bundle HTML snippet and any related media (<tag>_*) in one media group
+                media_group: list = []
+                for idx, p in enumerate(sorted(SNIPS.glob(f"{tag}_*"))):
+                    if not p.is_file():
+                        continue
+                    with open(p, 'rb') as f:
+                        bio = BytesIO(f.read())
+                    bio.name = p.name
+                    ext = p.suffix.lower()
+                    first = idx == 0
+                    if ext in ('.jpg', '.jpeg', '.png', '.gif'):
+                        media = InputMediaPhoto(
+                            media=bio,
+                            caption=html if first else None,
+                            parse_mode=ParseMode.HTML if first else None,
+                        )
+                    elif ext in ('.mp4', '.mov', '.mkv', '.webm'):
+                        media = InputMediaVideo(
+                            media=bio,
+                            caption=html if first else None,
+                            parse_mode=ParseMode.HTML if first else None,
+                        )
+                    else:
+                        media = InputMediaDocument(
+                            media=bio,
+                            caption=html if first else None,
+                            parse_mode=ParseMode.HTML if first else None,
+                        )
+                    media_group.append(media)
+                if media_group:
+                    await context.bot.send_media_group(
+                        chat_id=chat_id,
+                        media=media_group,
+                        reply_to_message_id=reply_target,
+                    )
+                else:
+                    # no media; send HTML text alone
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=html,
+                        parse_mode=ParseMode.HTML,
+                        reply_to_message_id=reply_target,
+                    )
                 continue
             plain_text, media_paths = parse_markdown_media(md, SNIPS)
             existing_media = [p for p in media_paths if p.exists()]
             if not existing_media:
                 # send raw markdown text with formatting
                 if plain_text:
+                    text_escaped = escape_markdown(plain_text, version=2)
+                    for ch in '*_[]()':
+                        text_escaped = text_escaped.replace(f'\\{ch}', ch)
                     await context.bot.send_message(
                         chat_id=chat_id,
-                        text=plain_text,
+                        text=text_escaped,
                         parse_mode=ParseMode.MARKDOWN_V2,
                         reply_to_message_id=reply_target,
                     )
@@ -131,6 +193,9 @@ def main():
             # prepare media group; if text is too long for a caption, send it separately
             caption = plain_text or ''
             long_caption = bool(caption and len(caption) > 1024)
+            caption_escaped = escape_markdown(caption, version=2) if caption else ''
+            for ch in '*_[]()':
+                caption_escaped = caption_escaped.replace(f'\\{ch}', ch)
             media_group = []
             for idx, p in enumerate(existing_media):
                 with open(p, 'rb') as f:
@@ -139,17 +204,29 @@ def main():
                 ext = p.suffix.lower()
                 first_caption = idx == 0 and caption and not long_caption
                 if ext in ('.jpg', '.jpeg', '.png', '.gif'):
-                    media = InputMediaPhoto(media=bio, caption=caption if first_caption else None, parse_mode=ParseMode.MARKDOWN_V2)
+                    media = InputMediaPhoto(
+                        media=bio,
+                        caption=caption_escaped if first_caption else None,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
                 elif ext in ('.mp4', '.mov', '.mkv', '.webm'):
-                    media = InputMediaVideo(media=bio, caption=caption if first_caption else None, parse_mode=ParseMode.MARKDOWN_V2)
+                    media = InputMediaVideo(
+                        media=bio,
+                        caption=caption_escaped if first_caption else None,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
                 else:
-                    media = InputMediaDocument(media=bio, caption=caption if first_caption else None, parse_mode=ParseMode.MARKDOWN_V2)
+                    media = InputMediaDocument(
+                        media=bio,
+                        caption=caption_escaped if first_caption else None,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
                 media_group.append(media)
             # send text separately if caption was too long
             if long_caption:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=caption,
+                    text=caption_escaped,
                     reply_to_message_id=reply_target,
                 )
             if media_group:
@@ -162,8 +239,7 @@ def main():
     async def handle_save(update, context):
         m = update.effective_message
         c = update.effective_chat
-        if c.type not in ('group', 'supergroup'):
-            return
+        logging.debug("handle_save called: user=%s chat=%s args=%s reply_to=%s", update.effective_user.id if update.effective_user else None, c.id if c else None, context.args, m.reply_to_message.message_id if m and m.reply_to_message else None)
         if not m or not m.reply_to_message:
             return
         # only allow whitelisted user IDs to save snips
@@ -174,16 +250,19 @@ def main():
             )
             return
         if not context.args or len(context.args) < 1:
-            await context.bot.send_message(chat_id=c.id, text='Usage: /save nameofhashtag')
+            await context.bot.send_message(
+                chat_id=c.id,
+                text='Usage: /saveng nameofhashtag (alias: /save)',
+            )
             return
         hashtag = context.args[0]
         reply = m.reply_to_message
         # preserve original markdown-style formatting via message entities
         parts = []
         if reply.text:
-            parts.append(reply.text_markdown_v2)
+            parts.append(reply.text_html)
         if reply.caption:
-            parts.append(reply.caption_markdown_v2)
+            parts.append(reply.caption_html)
         # collect all media attachments (photo, document, video, audio, voice, animation, video_note)
         media_entries: list = []
         if reply.photo:
@@ -212,11 +291,9 @@ def main():
             )
             return
 
-        # normal save: write markdown and download media locally
         ensure_snips_dir()
-        md_path = SNIPS / f"{hashtag}.md"
-        # track saved files for git
-        saved_files = [md_path]
+        html_path = SNIPS / f"{hashtag}.html"
+        saved_files = [html_path]
         lines = ['\n'.join(parts)] if parts else []
         for idx, ent in enumerate(media_entries):
             f1 = await context.bot.get_file(ent.file_id)
@@ -234,8 +311,7 @@ def main():
             except Exception:
                 continue
 
-        # write out snippet markdown file
-        with open(md_path, 'w', encoding='utf-8') as f:
+        with open(html_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines).strip() + '\n')
 
         # remove forward-only entry now that we have local snippet files
@@ -249,7 +325,6 @@ def main():
                 with open(META_FILE, 'w', encoding='utf-8') as mf:
                     yaml.safe_dump(meta, mf)
 
-        # commit new snip files to git
         try:
             # stage new snippet files and meta.yaml
             cmd = ['git', 'add'] + [str(p) for p in saved_files] + [str(META_FILE)]
@@ -272,10 +347,23 @@ def main():
                 e,
             )
 
-        await context.bot.send_message(chat_id=c.id, text=f"Saved snip '{hashtag}' (Markdown mode)")
+        await context.bot.send_message(chat_id=c.id, text=f"Saved snip '{hashtag}' (HTML mode)")
+
+    async def error_handler(update, context):
+        logging.error("Exception while handling update", exc_info=context.error)
+        if update and update.effective_chat:
+            try:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=f"⚠️ An error occurred:\n{context.error}",
+                )
+            except Exception as exc:
+                logging.error("Failed to send error message to user", exc_info=exc)
 
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    app.add_handler(CommandHandler('save', handle_save))
+    # handle both /saveng and legacy /save aliases
+    app.add_handler(CommandHandler(['saveng', 'save'], handle_save))
+    app.add_error_handler(error_handler)
     app.run_polling()
 
 if __name__ == '__main__':
