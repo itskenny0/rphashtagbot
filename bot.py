@@ -9,7 +9,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import List, Tuple
 
-from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument
+from telegram import InputMediaPhoto, InputMediaVideo, InputMediaDocument, InputMediaAudio
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from telegram.constants import ParseMode
 from telegram.helpers import escape_markdown
@@ -26,7 +26,7 @@ META_FILE = SNIPS / 'meta.yaml'
 MAX_MEDIA_SAVE_SIZE = 10 * 1024 * 1024
 GIT_NAME: str | None = None
 GIT_EMAIL: str | None = None
-HASHTAG_RE = re.compile(r'#([A-Za-z0-9_-]+)')
+HASHTAG_RE = re.compile(r'#([\w-]+)', re.UNICODE)
 MEDIA_RE = re.compile(r'!?\[[^\]]*\]\(([^)]+)\)')
 
 
@@ -131,11 +131,21 @@ def main():
                 html = load_snip_html(tag)
                 if html is None:
                     continue
-                # bundle HTML snippet and any related media (<tag>_*) in one media group
+                # try single voice note first
+                files = [p for p in sorted(SNIPS.glob(f"{tag}_*")) if p.is_file()]
+                if len(files) == 1 and files[0].suffix.lower() in ('.oga', '.ogg', '.opus'):
+                    with open(files[0], 'rb') as vf:
+                        await context.bot.send_voice(
+                            chat_id=chat_id,
+                            voice=vf,
+                            caption=html,
+                            parse_mode=ParseMode.HTML if html else None,
+                            reply_to_message_id=reply_target,
+                        )
+                    continue
+                # bundle HTML snippet and any related media in one media group
                 media_group: list = []
-                for idx, p in enumerate(sorted(SNIPS.glob(f"{tag}_*"))):
-                    if not p.is_file():
-                        continue
+                for idx, p in enumerate(files):
                     with open(p, 'rb') as f:
                         bio = BytesIO(f.read())
                     bio.name = p.name
@@ -149,6 +159,12 @@ def main():
                         )
                     elif ext in ('.mp4', '.mov', '.mkv', '.webm'):
                         media = InputMediaVideo(
+                            media=bio,
+                            caption=html if first else None,
+                            parse_mode=ParseMode.HTML if first else None,
+                        )
+                    elif ext in ('.oga', '.ogg', '.opus'):
+                        media = InputMediaAudio(
                             media=bio,
                             caption=html if first else None,
                             parse_mode=ParseMode.HTML if first else None,
@@ -196,6 +212,24 @@ def main():
             caption_escaped = escape_markdown(caption, version=2) if caption else ''
             for ch in '*_[]()':
                 caption_escaped = caption_escaped.replace(f'\\{ch}', ch)
+            # single voice-note file? send as a true voice message
+            if len(existing_media) == 1 and existing_media[0].suffix.lower() in ('.oga', '.ogg', '.opus'):
+                with open(existing_media[0], 'rb') as vf:
+                    await context.bot.send_voice(
+                        chat_id=chat_id,
+                        voice=vf,
+                        caption=caption_escaped if not long_caption else None,
+                        parse_mode=ParseMode.MARKDOWN_V2 if caption and not long_caption else None,
+                        reply_to_message_id=reply_target,
+                    )
+                # if caption was too long, send it separately before or after
+                if long_caption:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=caption_escaped,
+                        reply_to_message_id=reply_target,
+                    )
+                continue
             media_group = []
             for idx, p in enumerate(existing_media):
                 with open(p, 'rb') as f:
@@ -211,6 +245,12 @@ def main():
                     )
                 elif ext in ('.mp4', '.mov', '.mkv', '.webm'):
                     media = InputMediaVideo(
+                        media=bio,
+                        caption=caption_escaped if first_caption else None,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
+                elif ext in ('.oga', '.ogg', '.opus'):
+                    media = InputMediaAudio(
                         media=bio,
                         caption=caption_escaped if first_caption else None,
                         parse_mode=ParseMode.MARKDOWN_V2,
@@ -255,7 +295,7 @@ def main():
                 text='Usage: /saveng nameofhashtag (alias: /save)',
             )
             return
-        hashtag = context.args[0]
+        hashtag = context.args[0].lower()
         reply = m.reply_to_message
         # preserve original markdown-style formatting via message entities
         parts = []
