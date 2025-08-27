@@ -387,6 +387,32 @@ def main():
 
         await context.bot.send_message(chat_id=c.id, text=f"Saved snip '{hashtag}' (HTML mode)")
 
+    async def handle_listng(update, context):
+        ensure_snips_dir()
+        md_tags = {p.stem for p in SNIPS.glob("*.md")}
+        html_tags = {p.stem for p in SNIPS.glob("*.html")}
+        media_tags: set[str] = set()
+        for p in SNIPS.iterdir():
+            if p.is_file() and p.suffix.lower() not in ('.md', '.html') and '_' in p.stem:
+                media_tags.add(p.stem.split('_', 1)[0])
+        tags = sorted(md_tags | html_tags | media_tags)
+        chat_id = update.effective_chat.id
+        if not tags:
+            await context.bot.send_message(chat_id=chat_id, text="No snippets available.")
+            return
+        parts = []
+        chunk = ""
+        for tag in tags:
+            part = f"#{tag}\n"
+            if len(chunk) + len(part) > 4000:
+                parts.append(chunk)
+                chunk = ""
+            chunk += part
+        if chunk:
+            parts.append(chunk)
+        for chunk in parts:
+            await context.bot.send_message(chat_id=chat_id, text=chunk)
+
     async def error_handler(update, context):
         logging.error("Exception while handling update", exc_info=context.error)
         if update and update.effective_chat:
@@ -401,6 +427,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     # handle both /saveng and legacy /save aliases
     app.add_handler(CommandHandler(['saveng', 'save'], handle_save))
+    app.add_handler(CommandHandler('listng', handle_listng))
     app.add_error_handler(error_handler)
     app.run_polling()
 
