@@ -165,7 +165,7 @@ def main():
                             voice=vf,
                             caption=html,
                             parse_mode=ParseMode.HTML if html else None,
-                            reply_to_message_id=spicy_target,
+                            reply_to_message_id=reply_target,
                         )
                     continue
                 # bundle HTML snippet and any related media in one media group
