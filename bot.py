@@ -656,7 +656,7 @@ def main():
             except Exception as exc:
                 logging.error("Failed to send error message to user", exc_info=exc)
 
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    app.add_handler(MessageHandler(filters.UpdateType.MESSAGE & filters.TEXT & (~filters.COMMAND), handle_message))
     # handle both /saveng and legacy /save aliases
     app.add_handler(CommandHandler(['saveng', 'save'], handle_save))
     app.add_handler(CommandHandler('listng', handle_listng))
