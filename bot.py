@@ -135,6 +135,9 @@ def main():
         hashtags = extract_hashtags(m.text)
         spicy_words = load_spicy_triggers()
         spicy_matches = extract_spicy_triggers(m.text, spicy_words)
+        # don't fire spicy triggers in response to other bots
+        if update.effective_user and update.effective_user.is_bot:
+            spicy_matches = []
         logging.debug("extract_hashtags -> %s, spicy_triggers -> %s", hashtags, spicy_matches)
         # for spicy triggers, always reply to the actual triggering message
         spicy_target = m.message_id
